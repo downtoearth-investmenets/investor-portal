@@ -1,0 +1,20 @@
+{
+  "name": "down-to-earth-investments-portal",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "pnpm --filter ./apps/* --filter ./services/* run build",
+    "start": "node scripts/start.mjs",
+    "test": "node scripts/test-services.mjs",
+    "reset-data": "node scripts/reset-data.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.9",
+    "express": "^5.3.0"
+  }
+}
