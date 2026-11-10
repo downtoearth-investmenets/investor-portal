@@ -2,8 +2,8 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { LogOut, Menu, Pin, PinOff, X, type LucideIcon } from 'lucide-react';
+import { useEffect, useState, type ReactNode } from 'react';
+import { ChevronLeft, ChevronRight, LogOut, Menu, X, type LucideIcon } from 'lucide-react';
 import { useSession } from '@/shared/auth';
 import { BrandMark } from '@/shared/ui/Brand';
 import { cn } from '@/shared/lib/cn';
@@ -21,7 +21,6 @@ interface AppShellProps {
   children: ReactNode;
 }
 
-const PIN_KEY = 'dte.sidebar.pinned';
 const ITEM = 48; // px, height of a nav item
 const GAP = 8; // px, space between nav items
 const EASE = 'ease-[cubic-bezier(0.22,1,0.36,1)]';
@@ -39,7 +38,7 @@ function RailLabel({ show, children, className }: { show: boolean; children: Rea
   return (
     <span
       className={cn(
-        'min-w-0 truncate whitespace-nowrap transition-[opacity,transform] duration-300',
+        'min-w-0 truncate whitespace-nowrap transition-[opacity,transform] duration-300 motion-reduce:transition-none',
         EASE,
         show ? 'translate-x-0 opacity-100 delay-75' : '-translate-x-1.5 opacity-0',
         className
@@ -54,50 +53,16 @@ export function AppShell({ navItems, areaLabel, accountHref, children }: AppShel
   const { user, signOut } = useSession();
   const pathname = usePathname();
   const router = useRouter();
-  const [pinned, setPinned] = useState(false);
-  const [hovered, setHovered] = useState(false);
+  const [expanded, setExpanded] = useState(true);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const hoverTimer = useRef<number>();
-
-  useEffect(() => {
-    try {
-      const saved = window.localStorage.getItem(PIN_KEY);
-      if (saved !== null) setPinned(saved === '1');
-    } catch {
-      // Keep the default when storage is unavailable.
-    }
-  }, []);
 
   useEffect(() => setMobileOpen(false), [pathname]);
-  useEffect(() => () => window.clearTimeout(hoverTimer.current), []);
-
-  const togglePinned = () => {
-    const next = !pinned;
-    setPinned(next);
-    setHovered(false);
-    try {
-      window.localStorage.setItem(PIN_KEY, next ? '1' : '0');
-    } catch {
-      // Preference is optional.
-    }
-  };
-
-  // A short delay stops the rail from opening when the pointer just passes over it.
-  const onEnter = () => {
-    window.clearTimeout(hoverTimer.current);
-    hoverTimer.current = window.setTimeout(() => setHovered(true), 120);
-  };
-  const onLeave = () => {
-    window.clearTimeout(hoverTimer.current);
-    hoverTimer.current = window.setTimeout(() => setHovered(false), 160);
-  };
 
   const handleSignOut = () => {
     signOut();
     router.replace('/login');
   };
 
-  const expanded = pinned || hovered;
   const isActive = (href: string) => pathname === href || pathname.startsWith(`${href}/`);
   const activeIndex = navItems.findIndex(item => isActive(item.href));
   const indicatorY = Math.max(activeIndex, 0) * (ITEM + GAP);
@@ -128,17 +93,25 @@ export function AppShell({ navItems, areaLabel, accountHref, children }: AppShel
 
       {/* Desktop floating rail */}
       <aside
-        onMouseEnter={onEnter}
-        onMouseLeave={onLeave}
         aria-label="Sidebar"
         className={cn(
-          'fixed bottom-3 left-3 top-3 z-40 hidden flex-col overflow-hidden rounded-[28px] bg-forest px-3 py-4 text-white transition-[width,box-shadow] duration-300 lg:flex print:!hidden',
+          'group/sidebar fixed bottom-3 left-3 top-3 z-40 hidden flex-col rounded-[28px] bg-forest px-3 py-4 text-white shadow-[0_10px_30px_rgba(20,32,27,0.18)] transition-[width] duration-300 motion-reduce:transition-none lg:flex print:!hidden',
           EASE,
-          expanded ? 'w-60' : 'w-[72px]',
-          !pinned && hovered ? 'shadow-[0_24px_60px_rgba(20,32,27,0.35)]' : 'shadow-[0_10px_30px_rgba(20,32,27,0.18)]'
+          expanded ? 'w-44' : 'w-[72px]'
         )}
       >
-        <Link href={navItems[0]?.href ?? '/'} className="mb-8 flex h-12 items-center gap-3 pl-[6px]" aria-label="Down to Earth home">
+        <button
+          type="button"
+          aria-label={expanded ? 'Collapse sidebar' : 'Expand sidebar'}
+          aria-expanded={expanded}
+          onClick={() => setExpanded(open => !open)}
+          className="absolute right-0 top-1/2 z-10 grid h-11 w-8 -translate-y-1/2 translate-x-1/2 place-items-center rounded-full opacity-0 outline-none transition-opacity duration-200 group-hover/sidebar:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-sage-700 motion-reduce:transition-none [@media(hover:none)]:opacity-100"
+        >
+          <span className="grid h-9 w-6 place-items-center rounded-full border border-white/20 bg-forest text-sage-200 shadow-md">
+            {expanded ? <ChevronLeft size={16} aria-hidden /> : <ChevronRight size={16} aria-hidden />}
+          </span>
+        </button>
+        <Link href={navItems[0]?.href ?? '/'} className="mb-8 flex h-12 items-center gap-2 pl-[6px]" aria-label="Down to Earth home">
           <BrandMark className="h-9 w-9 rounded-2xl bg-sage-400" />
           <span className="flex min-w-0 flex-col leading-tight">
             <RailLabel show={expanded} className="text-sm font-semibold">
@@ -190,9 +163,9 @@ export function AppShell({ navItems, areaLabel, accountHref, children }: AppShel
           <Link
             href={accountHref}
             aria-current={isActive(accountHref) ? 'page' : undefined}
-            title={expanded ? undefined : 'Account'}
+            title={user?.fullName ?? 'Account'}
             className={cn(
-              'flex h-12 items-center gap-3 rounded-full pl-[6px] pr-3 outline-none transition-colors hover:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-sage-200',
+              'flex h-12 items-center gap-2 rounded-full pl-[6px] pr-2 outline-none transition-colors hover:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-sage-200',
               isActive(accountHref) && 'bg-white/[0.08]'
             )}
           >
@@ -211,17 +184,6 @@ export function AppShell({ navItems, areaLabel, accountHref, children }: AppShel
           <button type="button" onClick={handleSignOut} title={expanded ? undefined : 'Sign out'} className={cn(railButton, 'text-white/60 hover:bg-white/[0.06] hover:text-white')}>
             <LogOut className="h-5 w-5 shrink-0" aria-hidden />
             <RailLabel show={expanded}>Sign out</RailLabel>
-          </button>
-          <button
-            type="button"
-            onClick={togglePinned}
-            aria-pressed={pinned}
-            aria-label={pinned ? 'Unpin sidebar' : 'Keep sidebar open'}
-            title={expanded ? undefined : 'Keep sidebar open'}
-            className={cn(railButton, 'text-white/60 hover:bg-white/[0.06] hover:text-white')}
-          >
-            {pinned ? <PinOff className="h-5 w-5 shrink-0" aria-hidden /> : <Pin className="h-5 w-5 shrink-0" aria-hidden />}
-            <RailLabel show={expanded}>{pinned ? 'Unpin' : 'Keep open'}</RailLabel>
           </button>
         </div>
       </aside>
@@ -276,7 +238,7 @@ export function AppShell({ navItems, areaLabel, accountHref, children }: AppShel
         </div>
       )}
 
-      <div className={cn('transition-[padding] duration-300 print:!pl-0', EASE, pinned ? 'lg:pl-[264px]' : 'lg:pl-[96px]')}>
+      <div className={cn('transition-[padding] duration-300 motion-reduce:transition-none print:!pl-0', EASE, expanded ? 'lg:pl-[200px]' : 'lg:pl-[96px]')}>
         <main key={pathname} className="mx-auto w-full max-w-[1680px] animate-rise px-5 py-8 sm:px-8 lg:px-10 lg:py-10 2xl:px-14 print:max-w-none print:p-0">
           {children}
         </main>
