@@ -1,8 +1,7 @@
 import crypto from 'node:crypto';
-import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DatabaseSync } from 'node:sqlite';
+import { openStore, shouldSeed } from '../../packages/database/store.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -76,44 +75,33 @@ const SEED_USERS = [
   { id: 'usr_inv_3', email: 'investor.three@portal.example', role: 'investor', fullName: 'Demo Investor Three', phone: '', createdAt: '2025-03-01T09:15:00Z', profile: { id: 'inv_prof_3', entityName: 'Demo Trust Three' } }
 ];
 
-export function transaction(db, work) {
-  db.exec('BEGIN');
-  try {
-    const result = work();
-    db.exec('COMMIT');
-    return result;
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
-}
-
-function seed(db) {
-  const { count } = db.prepare('SELECT COUNT(*) AS count FROM users').get();
+async function seed(db) {
+  const { count } = await db.prepare('SELECT COUNT(*) AS count FROM users').get();
   if (count > 0) return;
 
   const passwordHash = hashPassword(DEMO_PASSWORD);
-  const insertUser = db.prepare(
-    'INSERT INTO users (id, email, role, full_name, phone, status, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-  );
-  const insertProfile = db.prepare('INSERT INTO investor_profiles (id, user_id, entity_name, accredited, created_at) VALUES (?, ?, ?, 1, ?)');
+  await db.transaction(async tx => {
+    const insertUser = tx.prepare(
+      'INSERT INTO users (id, email, role, full_name, phone, status, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    );
+    const insertProfile = tx.prepare('INSERT INTO investor_profiles (id, user_id, entity_name, accredited, created_at) VALUES (?, ?, ?, 1, ?)');
 
-  transaction(db, () => {
     for (const user of SEED_USERS) {
-      insertUser.run(user.id, user.email, user.role, user.fullName, user.phone, 'active', passwordHash, user.createdAt);
-      if (user.profile) insertProfile.run(user.profile.id, user.id, user.profile.entityName, user.createdAt);
+      await insertUser.run(user.id, user.email, user.role, user.fullName, user.phone, 'active', passwordHash, user.createdAt);
+      if (user.profile) await insertProfile.run(user.profile.id, user.id, user.profile.entityName, user.createdAt);
     }
   });
   console.log('[User-Service] Seeded demo accounts');
 }
 
-export function openDatabase() {
-  const file = process.env.DB_PATH || resolve(here, 'data', 'users.db');
-  mkdirSync(dirname(file), { recursive: true });
-  const db = new DatabaseSync(file);
-  db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
-  db.exec(SCHEMA);
-  if (process.env.NODE_ENV !== 'production') seed(db);
-  return db;
+export async function openDatabase({ url, file = process.env.DB_PATH } = {}) {
+  const db = openStore({ url, file: file || resolve(here, 'data', 'users.db'), sqliteSchema: SCHEMA, postgresSchema: 'portal_users' });
+  try {
+    await db.prepare('SELECT 1 FROM users LIMIT 1').get();
+    if (shouldSeed(db)) await seed(db);
+    return db;
+  } catch (error) {
+    await db.close();
+    throw error;
+  }
 }
-

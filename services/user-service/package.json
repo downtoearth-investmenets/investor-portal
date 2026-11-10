@@ -1,9 +1,5 @@
 {
   "name": "@downtoearth/user-service",
   "version": "1.0.0",
-  "type": "module",
-  "scripts": {
-    "start": "node --disable-warning=ExperimentalWarning server.mjs",
-    "dev": "node --disable-warning=ExperimentalWarning server.mjs"
-  }
+  "type": "module"
 }

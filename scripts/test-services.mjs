@@ -2,34 +2,54 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer } from 'node:net';
+import pg from 'pg';
 
 // End-to-end checks for the gateway and services. Each run uses fresh throwaway
 // databases, so it never touches the data you use with pnpm dev.
-const dataDir = mkdtempSync(join(tmpdir(), 'dte-test-'));
-const API = 'http://127.0.0.1:4000/api';
-const PASSWORD = process.env.DEMO_PASSWORD || 'LocalDemoOnly2026!';
-const NODE_ARGS = ['--disable-warning=ExperimentalWarning', 'server.mjs'];
+const pgUrls = [process.env.TEST_USER_DATABASE_URL, process.env.TEST_LOAN_DATABASE_URL];
+if (pgUrls.some(Boolean)) {
+  if (!pgUrls.every(Boolean)) throw new Error('Set both PostgreSQL test URLs.');
+  for (const value of pgUrls) {
+    const url = new URL(value);
+    if (!['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) || !url.pathname.startsWith('/dte_test')) {
+      throw new Error('PostgreSQL tests only accept disposable local dte_test databases.');
+    }
+  }
+}
 
-const services = {
-  users: { cwd: './services/user-service', env: { DB_PATH: join(dataDir, 'users.db') } },
-  loans: { cwd: './services/loan-service', env: { DB_PATH: join(dataDir, 'loans.db') } },
-  portfolio: { cwd: './services/portfolio-service', env: {} },
-  gateway: { cwd: './apps/gateway', env: {} }
+async function reservePort() {
+  const server = createServer();
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  return server;
+}
+
+const reservation = await reservePort();
+const apiPort = reservation.address().port;
+await new Promise(resolve => reservation.close(resolve));
+const origin = 'http://127.0.0.1:' + apiPort;
+const API = origin + '/api';
+const dataDir = mkdtempSync(join(tmpdir(), 'dte-test-'));
+const PASSWORD = process.env.DEMO_PASSWORD || 'LocalDemoOnly2026!';
+const backendEnv = {
+  ...process.env, HOST: '127.0.0.1', PORT: String(apiPort), NODE_ENV: 'test', ENABLE_DEMO_DATA: 'true',
+  RESEND_API_KEY: '', MAIL_FROM: '', DATABASE_URL: '',
+  USER_DB_PATH: join(dataDir, 'users.db'), LOAN_DB_PATH: join(dataDir, 'loans.db'),
+  USER_DATABASE_URL: pgUrls[0] || '', LOAN_DATABASE_URL: pgUrls[1] || ''
 };
 
-const running = {};
-function start(name) {
-  const { cwd, env } = services[name];
-  const child = spawn('node', NODE_ARGS, { cwd, env: { ...process.env, ...env, NODE_ENV: 'test', RESEND_API_KEY: '', MAIL_FROM: '' }, stdio: ['ignore', 'ignore', 'inherit'] });
-  running[name] = child;
-  return child;
+let backend;
+function start() {
+  backend = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'apps/backend/server.mjs'], {
+    env: backendEnv, stdio: ['ignore', 'ignore', 'inherit']
+  });
 }
-function stop(name) {
+
+function stop() {
   return new Promise(resolve => {
-    const child = running[name];
-    if (!child || child.exitCode !== null) return resolve();
-    child.once('exit', resolve);
-    child.kill();
+    if (!backend || backend.exitCode !== null || backend.signalCode !== null) return resolve();
+    backend.once('exit', resolve);
+    backend.kill();
   });
 }
 
@@ -67,8 +87,28 @@ async function waitFor(url) {
 const tokenFrom = link => link.split('/').pop();
 
 try {
-  Object.keys(services).forEach(start);
+  if (pgUrls[0]) {
+    for (const [i, url] of pgUrls.entries()) {
+      const client = new pg.Client({ connectionString: url });
+      await client.connect();
+      try {
+        const other = i ? 'portal_users' : 'portal_loans';
+        const { rows } = await client.query('SELECT has_schema_privilege(current_user, $1, \'USAGE\') AS allowed', [other]);
+        if (rows[0].allowed) throw new Error('A runtime role can access the other service schema.');
+        const table = i ? 'portal_loans.loans' : 'portal_users.users';
+        const probe = await client.query('SELECT 1 FROM ' + table + ' LIMIT 1');
+        if (probe.rowCount) throw new Error('Start PostgreSQL tests with fresh empty schemas.');
+      } finally {
+        await client.end();
+      }
+    }
+    check('PostgreSQL runtime roles are isolated', true);
+  }
+  start();
   await waitFor(API + '/health');
+  const privatePaths = ['/users/investors', '/loans/loans', '/portfolio/portfolio/admin-overview'];
+  const privateStatus = await Promise.all(privatePaths.map(path => fetch(origin + path).then(res => res.status)));
+  check('internal module routes are not served on the public port', privateStatus.every(status => status === 404));
 
   console.log('Sign-in');
   check('wrong password is rejected', (await login('admin.one@portal.example', 'nope')).status === 401);
@@ -107,7 +147,13 @@ try {
     (await call('/loans/' + lateLoan.id + '/payments', { token: A, method: 'POST', body: { installmentNumber: open.installmentNumber + 1, amount: 10, receivedDate: today } })).status === 400);
   check('future received date is rejected',
     (await call('/loans/' + lateLoan.id + '/payments', { token: A, method: 'POST', body: { amount: open.paymentAmount, receivedDate: '2999-01-01' } })).status === 400);
-  const paid = await call('/loans/' + lateLoan.id + '/payments', { token: A, method: 'POST', body: { amount: open.paymentAmount, receivedDate: today, method: 'Check', reference: '1042' } });
+  const record = () => call('/loans/' + lateLoan.id + '/payments', { token: A, method: 'POST', body: {
+    installmentNumber: open.installmentNumber, amount: open.paymentAmount, receivedDate: today, method: 'Check', reference: '1042'
+  } });
+  const concurrentPayments = await Promise.all([record(), record()]);
+  const paid = concurrentPayments.find(result => result.status === 201) || concurrentPayments[0];
+  check('two requests cannot record the same installment', concurrentPayments.filter(result => result.status === 201).length === 1 &&
+    concurrentPayments.some(result => result.status === 400 || result.status === 409));
   check('admin can record a payment', paid.status === 201 && paid.data.loan.status === 'active', JSON.stringify(paid.data).slice(0, 200));
   check('recording is logged with who did it', paid.data.loan.activity[0].kind === 'payment' && paid.data.loan.activity[0].actor === 'Demo Admin One');
   const afterPay = (await call('/portfolio/admin-overview', { token: A })).data;
@@ -145,9 +191,9 @@ try {
   check('investor sees the new rate and its history', seen.interestRate === 12.25 && seen.rateHistory.length === 2);
 
   console.log('Data survives a restart');
-  await stop('loans');
-  start('loans');
-  await waitFor('http://127.0.0.1:4002/health');
+  await stop();
+  start();
+  await waitFor(API + '/health');
   const reloaded = await call('/loans/' + target.id, { token: A });
   check('rate change is still there after restart',
     reloaded.status === 200 && reloaded.data.interestRate === 12.25 && reloaded.data.rateHistory.length === 2,
@@ -170,7 +216,10 @@ try {
   const lookup = await call('/users/links/invite/' + inviteToken);
   check('invite link shows who it is for', lookup.status === 200 && lookup.data.email === email);
   check('weak password rejected', (await call('/users/links/invite/' + inviteToken, { method: 'POST', body: { password: 'short' } })).status === 400);
-  const accepted = await call('/users/links/invite/' + inviteToken, { method: 'POST', body: { password: 'LocalInviteTest2026!' } });
+  const accept = () => call('/users/links/invite/' + inviteToken, { method: 'POST', body: { password: 'LocalInviteTest2026!' } });
+  const concurrentInvites = await Promise.all([accept(), accept()]);
+  const accepted = concurrentInvites.find(result => result.status === 200) || concurrentInvites[0];
+  check('concurrent requests can only redeem a link once', concurrentInvites.map(result => result.status).sort().join(',') === '200,410');
   check('investor can set a password and is signed in', accepted.status === 200 && accepted.data.user.status === 'active' && Boolean(accepted.data.token));
   check('invite link works only once', (await call('/users/links/invite/' + inviteToken, { method: 'POST', body: { password: 'LocalInviteTest2026!' } })).status === 410);
   check('investor can sign in with their own password', (await login(email, 'LocalInviteTest2026!')).status === 200);
@@ -224,6 +273,25 @@ try {
   const dated = await fetch(API + '/reports/payments?format=csv&today=2026-11-08', { headers: { Authorization: 'Bearer ' + A2 } });
   check('CSV uses the viewer date', (await dated.text()).includes('Generated,2026-11-08'));
 
+  console.log('Origination');
+  const note = {
+    investorId: 'inv_prof_3', investorName: 'Demo Investor Three',
+    borrowerName: 'Synthetic Test Borrower', principalAmount: 18250.55, interestRate: 9.125,
+    termMonths: 36, originationDate: today,
+    property: { county: 'Sample County', state: 'Colorado', apn: 'TEST-NOTE-01' }
+  };
+  const originate = body => call('/loans', { method: 'POST', token: A2, body });
+  const notes = await Promise.all([originate(note), originate({ ...note, borrowerName: 'Second Test Borrower' })]);
+  check('concurrent originations get distinct note numbers', notes.every(result => result.status === 201) &&
+    notes[0].data.loan.loanNumber !== notes[1].data.loan.loanNumber);
+  check('origination preserves dollars, rate and calendar date', notes[0].data.loan?.principalAmount === note.principalAmount &&
+    notes[0].data.loan?.interestRate === note.interestRate && notes[0].data.loan?.originationDate === note.originationDate);
+  check('invalid calendar dates return a validation error', (await originate({ ...note, originationDate: '2026-02-30' })).status === 400);
+  if (pgUrls[0]) {
+    const unassigned = await originate({ ...note, investorId: 'missing-test-investor' });
+    check('PostgreSQL rejects notes without an existing investor', unassigned.status === 400 && unassigned.data.field === 'investorId');
+  }
+
   console.log('Sign-out');
   await call('/users/logout', { token: J, method: 'POST' });
   check('token is revoked after sign-out', (await call('/loans', { token: J })).status === 401);
@@ -231,7 +299,7 @@ try {
   failures += 1;
   console.error('Test error:', e);
 } finally {
-  await Promise.all(Object.keys(running).map(stop));
+  await stop();
   rmSync(dataDir, { recursive: true, force: true });
   console.log(failures ? '\n' + failures + ' check(s) failed' : '\nAll checks passed');
   process.exit(failures ? 1 : 0);

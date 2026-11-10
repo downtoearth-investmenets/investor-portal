@@ -2,37 +2,15 @@
 
 Custom-built investor portal and loan management platform designed specifically for **Down to Earth Investments**.
 
-The system implements a **Progressive Feature MVVM (Model-View-ViewModel)** architecture on the frontend and a **Node.js Microservices Cluster** on the backend.
+The system implements a **Progressive Feature MVVM (Model-View-ViewModel)** architecture on the frontend and a **Node.js backend with separate account, loan, and reporting modules** on the backend.
 
 ---
 
-## Architecture Overview
+## Architecture overview
 
-```
-                     +---------------------------------------+
-                     |    Next.js 14 Web Frontend (MVVM)     |
-                     |         http://localhost:3000         |
-                     +-------------------+-------------------+
-                                         |
-                                         | (Reverse Proxy /api/*)
-                                         v
-                     +---------------------------------------+
-                     |         Node.js API Gateway           |
-                     |         http://localhost:4000         |
-                     +---+-------------------+---------------+
-                         |                   |               |
-                         v                   v               v
-            +--------------------+  +------------------+  +----------------------+
-            |    User Service    |  |   Loan Service   |  |  Portfolio Service   |
-            |     Port: 4001     |  |    Port: 4002    |  |      Port: 4003      |
-            +--------------------+  +------------------+  +----------------------+
-            | - Investor Accounts|  | - Land Notes     |  | - Aggregate AUM      |
-            | - Token Invites    |  | - APN / Parcels  |  | - Blended Yields     |
-            | - Auth & Personas  |  | - Amortization   |  | - Inflow Projections |
-            +--------------------+  +------------------+  +----------------------+
-```
-
----
+- Next.js serves the frontend and forwards /api requests to the Node.js backend.
+- One Node.js process runs the public API and all three modules. Internal routes are available only on an authenticated loopback listener.
+- Accounts and loans use separate stores. Reporting reads them and does not need a database of its own.
 
 ## 1. Frontend Progressive Feature MVVM Structure
 
@@ -67,16 +45,16 @@ Each feature slice implements the strict reactive pipeline:
 
 ---
 
-## 2. Node.js Microservices Cluster
+## 2. Node.js backend
 
-| Service | Port | Description & Responsibilities |
-| :--- | :--- | :--- |
-| **API Gateway** | `4000` | Single entry point. Checks the session, enforces admin vs investor access, limits repeated sign-in attempts, and emails investors after a rate change. |
-| **User Service** | `4001` | Accounts, sessions, invites, password reset and change. Owns `services/user-service/data/users.db`. |
-| **Loan Service** | `4002` | Notes, land details, rate history, the payment ledger, and the activity log. Owns `services/loan-service/data/loans.db`. |
-| **Portfolio Service** | `4003` | Read-only totals for dashboards: collected vs scheduled, late payments, investor income. No database of its own. |
+| Module | Responsibilities |
+| --- | --- |
+| API gateway | The public entry point. Checks sessions, enforces admin and investor permissions, and limits repeated sign-in attempts. |
+| Users | Accounts, sessions, invites, and password recovery. |
+| Loans | Notes, property details, fixed-rate history, the payment ledger, and the audit log. |
+| Portfolio and reports | Read-only dashboard totals, schedules, and report exports. |
 
-Each service with data keeps its own SQLite file (built into Node 22.5+, no extra install). The SQL lives in each service's `db.mjs` and `server.mjs`, so moving to Postgres for production is a contained change.
+SQLite remains the local default (Node 22.5+). Set both `USER_DATABASE_URL` and `LOAN_DATABASE_URL` to use PostgreSQL with separate restricted roles. See the [PostgreSQL and Supabase setup guide](docs/postgres.md).
 
 ### Rules that protect the numbers
 
@@ -145,20 +123,12 @@ Set `RESEND_API_KEY` and `MAIL_FROM` on the user service to send real email thro
 node scripts/test-services.mjs
 ```
 
-Runs about 50 checks: sign-in, role boundaries, investor data isolation, the payment ledger, rate changes that keep history, data surviving a restart, invites, password reset and change, sign-in limits, and sign-out. It uses throwaway databases, so your data is untouched. Stop `pnpm dev` first, because the test starts its own services on ports 4000–4003.
+Runs the service integration suite: sign-in, role boundaries, investor data isolation, the payment ledger, rate changes that keep history, data surviving a restart, invites, password reset and change, sign-in limits, and sign-out. By default it uses throwaway SQLite files and temporary ports. For PostgreSQL checks, see [the database setup guide](docs/postgres.md).
 
-### Start All Services (Full Cluster + Frontend)
-```bash
-pnpm dev
-# or: node scripts/dev.mjs
-```
+### Start the portal locally
 
-This will start:
-* User Service on `http://localhost:4001`
-* Loan Service on `http://localhost:4002`
-* Portfolio Service on `http://localhost:4003`
-* API Gateway on `http://localhost:4000`
-* Next.js Web App on `http://localhost:3000`
+Run `pnpm dev` to start the [frontend](http://localhost:3000) and [API](http://localhost:4000/health). Use `pnpm start:api` to run just the backend.
 
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+### Deploy
 
+Use [the Render and Vercel setup guide](docs/deployment.md) to deploy one backend service and the frontend.

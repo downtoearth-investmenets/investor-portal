@@ -26,7 +26,7 @@ export function createMailer(db) {
       }
     }
 
-    record.run(to, subject, text, via, new Date().toISOString());
+    await record.run(to, subject, text, via, new Date().toISOString());
     const delivered = via === 'resend';
     if (!delivered && !isProduction) {
       console.log(`[User-Service] Email not sent (no mail provider). To: ${to} | ${subject}\n${text}\n`);

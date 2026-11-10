@@ -4,7 +4,11 @@ export const round2 = value => Math.round(value * 100) / 100;
 
 export const todayIso = () => new Date().toISOString().slice(0, 10);
 
-export const isIsoDate = value => /^\d{4}-\d{2}-\d{2}$/.test(String(value || '')) && !Number.isNaN(Date.parse(value));
+export function isIsoDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value) || value.startsWith('0000')) return false;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
 
 // Adds whole months and keeps the day of month, clamped to the end of shorter months.
 export function addMonths(isoDate, months) {

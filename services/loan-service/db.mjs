@@ -1,7 +1,6 @@
-import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DatabaseSync } from 'node:sqlite';
+import { openStore, shouldSeed } from '../../packages/database/store.mjs';
 import { todayIso } from './schedule.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -94,56 +93,45 @@ const SEED_LOANS = [
   }
 ];
 
-export function transaction(db, work) {
-  db.exec('BEGIN');
-  try {
-    const result = work();
-    db.exec('COMMIT');
-    return result;
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
-}
-
-function seed(db, computeSchedule) {
-  const { count } = db.prepare('SELECT COUNT(*) AS count FROM loans').get();
+async function seed(db, computeSchedule) {
+  const { count } = await db.prepare('SELECT COUNT(*) AS count FROM loans').get();
   if (count > 0) return;
 
   const stamp = new Date().toISOString();
   const today = todayIso();
-  const insertLoan = db.prepare(`INSERT INTO loans (id, loan_number, borrower_name, borrower_contact, principal_amount, term_months, origination_date,
-    status, investor_id, investor_name, property, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`);
-  const insertRate = db.prepare('INSERT INTO rate_changes (loan_id, rate, effective_date, reason, changed_by, created_at) VALUES (?, ?, ?, ?, ?, ?)');
-  const insertPayment = db.prepare(
-    'INSERT INTO payments (loan_id, installment_number, amount, received_date, method, reference, recorded_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-  );
-  const insertActivity = db.prepare('INSERT INTO activity (loan_id, kind, message, actor, created_at) VALUES (?, ?, ?, ?, ?)');
+  await db.transaction(async tx => {
+    const insertLoan = tx.prepare(`INSERT INTO loans (id, loan_number, borrower_name, borrower_contact, principal_amount, term_months, origination_date,
+      status, investor_id, investor_name, property, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`);
+    const insertRate = tx.prepare('INSERT INTO rate_changes (loan_id, rate, effective_date, reason, changed_by, created_at) VALUES (?, ?, ?, ?, ?, ?)');
+    const insertPayment = tx.prepare(
+      'INSERT INTO payments (loan_id, installment_number, amount, received_date, method, reference, recorded_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    );
+    const insertActivity = tx.prepare('INSERT INTO activity (loan_id, kind, message, actor, created_at) VALUES (?, ?, ?, ?, ?)');
 
-  transaction(db, () => {
     for (const loan of SEED_LOANS) {
-      insertLoan.run(loan.id, loan.loanNumber, loan.borrowerName, loan.borrowerContact, loan.principalAmount, loan.termMonths, loan.originationDate,
+      await insertLoan.run(loan.id, loan.loanNumber, loan.borrowerName, loan.borrowerContact, loan.principalAmount, loan.termMonths, loan.originationDate,
         loan.investorId, loan.investorName, JSON.stringify(loan.property), loan.notes, stamp, stamp);
-      insertRate.run(loan.id, loan.interestRate, loan.originationDate, 'Original note rate', 'Demo Admin One', stamp);
-      insertActivity.run(loan.id, 'created', `Note created at ${loan.interestRate}%`, 'Demo Admin One', loan.originationDate + 'T09:00:00Z');
+      await insertRate.run(loan.id, loan.interestRate, loan.originationDate, 'Original note rate', 'Demo Admin One', stamp);
+      await insertActivity.run(loan.id, 'created', `Note created at ${loan.interestRate}%`, 'Demo Admin One', loan.originationDate + 'T09:00:00Z');
 
-      const due = computeSchedule(loan.id).filter(item => item.dueDate < today);
+      const due = (await computeSchedule(tx, loan.id)).filter(item => item.dueDate < today);
       const toPay = loan.skipLatestPayment ? due.slice(0, -1) : due;
       for (const item of toPay) {
-        insertPayment.run(loan.id, item.installmentNumber, item.paymentAmount, item.dueDate, 'ACH', '', 'Demo Admin One', item.dueDate + 'T15:00:00Z');
+        await insertPayment.run(loan.id, item.installmentNumber, item.paymentAmount, item.dueDate, 'ACH', '', 'Demo Admin One', item.dueDate + 'T15:00:00Z');
       }
     }
   });
   console.log('[Loan-Service] Seeded demo notes and payment history');
 }
 
-export function openDatabase(computeSchedule) {
-  const file = process.env.DB_PATH || resolve(here, 'data', 'loans.db');
-  mkdirSync(dirname(file), { recursive: true });
-  const db = new DatabaseSync(file);
-  db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
-  db.exec(SCHEMA);
-  if (process.env.NODE_ENV !== 'production') seed(db, loanId => computeSchedule(db, loanId));
-  return db;
+export async function openDatabase(computeSchedule, { url, file = process.env.DB_PATH } = {}) {
+  const db = openStore({ url, file: file || resolve(here, 'data', 'loans.db'), sqliteSchema: SCHEMA, postgresSchema: 'portal_loans' });
+  try {
+    await db.prepare('SELECT 1 FROM loans LIMIT 1').get();
+    if (shouldSeed(db)) await seed(db, computeSchedule);
+    return db;
+  } catch (error) {
+    await db.close();
+    throw error;
+  }
 }
-
